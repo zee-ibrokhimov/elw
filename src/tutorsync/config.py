@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     gcal_calendar_buffers: str = ""
     extra_busy_calendar_ids: str = ""
 
+    #: Считать ли занятостью события на весь день из читаемых календарей.
+    #: По умолчанию нет: дни рождения и праздники заняли бы сутки целиком,
+    #: а отпуск задаётся через schedule_exceptions с явными границами.
+    busy_include_all_day: bool = False
+    #: Насколько назад тянуть чужую занятость. Сутки — чтобы урок, начавшийся
+    #: вчера вечером и идущий за полночь, не пропал из расчёта.
+    busy_import_past_days: int = Field(default=1, ge=0)
+    busy_import_interval_min: int = Field(default=5, gt=0)
+
     gcal_inbound_mode: InboundMode = InboundMode.DETECT
     gcal_webhook_token: str = ""
     gcal_webhook_path_secret: str = ""
