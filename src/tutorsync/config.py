@@ -219,39 +219,24 @@ class Settings(BaseSettings):
         return self
 
     def require_runtime_secrets(self) -> None:
-        """Проверка обязательных секретов на старте процесса.
+        """Проверка секретов, без которых процесс не сможет работать.
 
-        Вызывается из точки входа, а не из валидатора: тестам и alembic
-        полный набор секретов не нужен, а падать на импорте — неудобно.
+        Требуется ровно то, что задействовано уже написанным кодом. Настройки
+        функций, которые ещё не подключены, сюда не входят: иначе сервис нельзя
+        было бы развернуть и проверить, не настроив заранее всё до последней
+        переменной. Недостающее для будущих этапов возвращает missing_optional().
+
+        Вызывается из точки входа, а не из валидатора: alembic и тесты
+        обходятся без секретов, и падать на импорте им незачем.
         """
-        missing: list[str] = []
-        common = {
-            "SECRET_ENC_KEY": self.secret_enc_key,
+        required: dict[str, str] = {
             "DATABASE_URL": self.database_url,
+            "SECRET_ENC_KEY": self.secret_enc_key,
         }
-        telegram = {
-            "TELEGRAM_BOT_TOKEN": self.telegram_bot_token,
-            "ADMIN_TELEGRAM_IDS": self.admin_telegram_ids,
-        }
-        google = {
-            "GOOGLE_CLIENT_ID": self.google_client_id,
-            "GOOGLE_CLIENT_SECRET": self.google_client_secret,
-            "GCAL_CALENDAR_PREPLY": self.gcal_calendar_preply,
-            "GCAL_CALENDAR_PRIVATE": self.gcal_calendar_private,
-            "GCAL_CALENDAR_BUFFERS": self.gcal_calendar_buffers,
-        }
-        required: dict[str, str] = {**common, **telegram}
-        if self.role is Role.WEB:
-            required |= google
+        if self.role is Role.BOT:
             required |= {
-                "GCAL_WEBHOOK_TOKEN": self.gcal_webhook_token,
-                "GCAL_WEBHOOK_PATH_SECRET": self.gcal_webhook_path_secret,
-            }
-        elif self.role is Role.WORKER:
-            required |= google
-            required |= {
-                "IMAP_USER": self.imap_user,
-                "IMAP_PASSWORD": self.imap_password,
+                "TELEGRAM_BOT_TOKEN": self.telegram_bot_token,
+                "ADMIN_TELEGRAM_IDS": self.admin_telegram_ids,
             }
 
         missing = [name for name, value in required.items() if not value]
@@ -260,6 +245,43 @@ class Settings(BaseSettings):
                 f"Не заданы обязательные переменные окружения для ROLE={self.role.value}: "
                 + ", ".join(missing)
             )
+
+    def missing_optional(self) -> dict[str, str]:
+        """Незаполненные настройки функций, которые подключаются позже.
+
+        Возвращает имя переменной -> что из-за неё не заработает. Пишется в лог
+        предупреждением на старте, чтобы забытая переменная всплыла сразу,
+        а не в момент, когда ученик не получил напоминание.
+        """
+        pending: dict[str, str] = {}
+        google = {
+            "GOOGLE_CLIENT_ID": self.google_client_id,
+            "GOOGLE_CLIENT_SECRET": self.google_client_secret,
+            "GCAL_CALENDAR_PREPLY": self.gcal_calendar_preply,
+            "GCAL_CALENDAR_PRIVATE": self.gcal_calendar_private,
+            "GCAL_CALENDAR_BUFFERS": self.gcal_calendar_buffers,
+        }
+        for name, value in google.items():
+            if not value:
+                pending[name] = "синхронизация с Google Календарём"
+
+        if self.role is Role.WEB:
+            for name, value in {
+                "GCAL_WEBHOOK_TOKEN": self.gcal_webhook_token,
+                "GCAL_WEBHOOK_PATH_SECRET": self.gcal_webhook_path_secret,
+            }.items():
+                if not value:
+                    pending[name] = "приём push-уведомлений Google"
+
+        if self.role is Role.WORKER:
+            for name, value in {
+                "IMAP_USER": self.imap_user,
+                "IMAP_PASSWORD": self.imap_password,
+            }.items():
+                if not value:
+                    pending[name] = "приём писем Preply"
+
+        return pending
 
 
 @lru_cache(maxsize=1)

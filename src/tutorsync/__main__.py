@@ -70,6 +70,12 @@ def main() -> None:
         raise SystemExit(f"Неизвестная команда {command_name!r}. Доступна: migrate")
 
     settings.require_runtime_secrets()
+
+    # Не заполненное для будущих этапов не мешает старту, но должно быть видно
+    # в логе: молча запущенный процесс без половины настроек выглядит здоровым.
+    for name, feature in settings.missing_optional().items():
+        log.warning("config.not_configured", variable=name, disables=feature)
+
     log.info("process.starting", role=settings.role.value)
 
     match settings.role:

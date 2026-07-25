@@ -55,26 +55,51 @@ def test_empty_durations_rejected(env):
         env(LESSON_DURATIONS="")
 
 
+def test_bot_requires_token(env):
+    settings = env(ROLE="bot", TELEGRAM_BOT_TOKEN="")
+
+    with pytest.raises(RuntimeError, match="TELEGRAM_BOT_TOKEN"):
+        settings.require_runtime_secrets()
+
+
+@pytest.mark.parametrize("role", [Role.WEB, Role.WORKER, Role.BOT])
+def test_unconfigured_features_do_not_block_startup(env, role: Role):
+    """Незаполненное для будущих этапов не должно ронять процесс.
+
+    Иначе сервис нельзя развернуть и проверить, пока не настроено вообще всё:
+    ни цепочку деплоя, ни доступность базы.
+    """
+    settings = env(ROLE=role.value)
+
+    settings.require_runtime_secrets()  # не должно бросать
+
+
 @pytest.mark.parametrize(
-    ("role", "expected_missing"),
+    ("role", "expected_variable"),
     [
         (Role.WORKER, "IMAP_USER"),
         (Role.WEB, "GCAL_WEBHOOK_TOKEN"),
     ],
 )
-def test_missing_secrets_reported_per_role(env, role: Role, expected_missing: str):
-    """Каждая роль требует своего набора секретов.
-
-    Боту не нужен доступ к почте, воркеру — секрет вебхука. Общая проверка
-    заставляла бы заполнять всё ради запуска одного процесса.
-    """
+def test_pending_settings_reported_per_role(env, role: Role, expected_variable: str):
+    """Каждой роли своё: боту не нужен доступ к почте, воркеру — секрет вебхука."""
     settings = env(ROLE=role.value)
 
-    with pytest.raises(RuntimeError, match=expected_missing):
-        settings.require_runtime_secrets()
+    pending = settings.missing_optional()
+
+    assert expected_variable in pending
+    # Отчёт должен объяснять, что именно не заработает, а не только чего не хватает.
+    assert pending[expected_variable]
 
 
-def test_bot_role_needs_no_google_or_imap(env):
-    settings = env(ROLE="bot")
+def test_configured_google_not_reported(env):
+    settings = env(
+        ROLE="bot",
+        GOOGLE_CLIENT_ID="id",
+        GOOGLE_CLIENT_SECRET="secret",
+        GCAL_CALENDAR_PREPLY="a@group.calendar.google.com",
+        GCAL_CALENDAR_PRIVATE="b@group.calendar.google.com",
+        GCAL_CALENDAR_BUFFERS="c@group.calendar.google.com",
+    )
 
-    settings.require_runtime_secrets()  # не должно бросать
+    assert settings.missing_optional() == {}
