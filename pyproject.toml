@@ -67,3 +67,10 @@ python_version = "3.12"
 packages = ["tutorsync"]
 strict_optional = true
 warn_unused_ignores = true
+
+# Библиотеки без аннотаций и без py.typed. Заглушек к ним не существует, а
+# писать свои ради трёх вызовов дороже, чем пользы: проверка типов нашего кода
+# от этого не страдает, страдает только проверка их внутренностей.
+[[tool.mypy.overrides]]
+module = ["googleapiclient.*", "google_auth_oauthlib.*", "apscheduler.*"]
+ignore_missing_imports = true
