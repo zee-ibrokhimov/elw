@@ -1,0 +1,91 @@
+# Локальный запуск всего стека. В Coolify этот файл не используется —
+# там три отдельных ресурса из одного образа, различающихся переменной ROLE.
+
+x-app: &app
+  build: .
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tutorsync
+      POSTGRES_PASSWORD: tutorsync
+      POSTGRES_DB: tutorsync
+    ports:
+      # Наружу только для локальной отладки и прогона тестов на настоящем Postgres.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tutorsync -d tutorsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Миграции применяются одним разовым контейнером, чтобы три сервиса
+  # не гонялись за одну и ту же блокировку Alembic на старте.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["migrate"]
+
+  web:
+    <<: *app
+    environment:
+      ROLE: web
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  bot:
+    <<: *app
+    environment:
+      ROLE: bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    environment:
+      ROLE: worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Прогон тестов: docker compose run --rm tests
+  # Тесты на EXCLUDE-констрейнты и двойное бронирование идут против настоящего
+  # Postgres — на SQLite они проверяли бы не тот механизм, что работает в проде.
+  tests:
+    build:
+      context: .
+      target: dev
+    env_file: .env
+    environment:
+      POSTGRES_TEST_DSN: postgresql+asyncpg://tutorsync:tutorsync@postgres:5432/tutorsync_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["tools"]
+    restart: "no"
+
+volumes:
+  pgdata:

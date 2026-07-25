@@ -1,0 +1,26 @@
+.env
+*.env
+!.env.example
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+*.sqlite3
+*.db
+
+# Реальные письма Preply содержат персональные данные учеников.
+# Обезличенные фикстуры для тестов лежат в tests/fixtures/emails/ и коммитятся.
+samples/*
+!samples/README.md
+
+.idea/
+.vscode/
+.DS_Store
