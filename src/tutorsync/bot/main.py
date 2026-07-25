@@ -20,12 +20,7 @@ from aiogram.types import Message
 from tutorsync import __version__
 from tutorsync.config import Settings, get_settings
 from tutorsync.db.session import dispose_engine, get_sessionmaker
-from tutorsync.gcal.oauth import (
-    OAuthNotConfiguredError,
-    build_auth_url,
-    has_credentials,
-    make_state,
-)
+from tutorsync.gcal.oauth import OAuthNotConfiguredError, build_auth_url, has_credentials
 from tutorsync.logging import get_logger
 
 log = get_logger(__name__)
@@ -68,7 +63,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         колбэку не нужен собственный пароль.
         """
         try:
-            url = build_auth_url(make_state())
+            url = build_auth_url()
         except OAuthNotConfiguredError as exc:
             await message.answer(f"Не готово: {exc}")
             return

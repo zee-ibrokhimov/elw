@@ -1,8 +1,14 @@
 """Проверки одноразового state.
 
-Смысл этих тестов не в криптографии, а в единственном барьере, который стоит
-перед публичным колбэком: если state можно подделать или переиспользовать
-через сутки, посторонний подключит к сервису свой Google-аккаунт.
+Смысл этих тестов не в криптографии, а в двух вещах сразу.
+
+Первая — единственный барьер перед публичным колбэком: если state можно
+подделать или переиспользовать через сутки, посторонний подключит к сервису
+свой Google-аккаунт.
+
+Вторая — доставка code_verifier. Он генерируется при построении ссылки, а нужен
+в другом HTTP-запросе, где объект Flow создаётся заново. Ровно на этом
+авторизация уже ломалась один раз: Google отвечал «Missing code verifier».
 """
 
 from __future__ import annotations
@@ -22,39 +28,66 @@ def oauth(env):
     return mod
 
 
+def test_verifier_survives_the_round_trip(oauth):
+    verifier = oauth.make_code_verifier()
+    assert oauth.verify_state(oauth._pack_state(verifier)) == verifier
+
+
+def test_verifier_is_not_readable_in_the_url(oauth):
+    """state уезжает в адресную строку и оседает в истории браузера."""
+    verifier = oauth.make_code_verifier()
+    assert verifier not in oauth._pack_state(verifier)
+
+
+def test_verifier_matches_rfc_7636(oauth):
+    verifier = oauth.make_code_verifier()
+    assert 43 <= len(verifier) <= 128
+    assert set(verifier) <= set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
+
+def test_each_link_gets_its_own_verifier(oauth):
+    assert oauth.make_code_verifier() != oauth.make_code_verifier()
+
+
 def test_fresh_state_passes(oauth):
-    oauth.verify_state(oauth.make_state())
+    oauth.verify_state(oauth._pack_state("verifier"))
 
 
 def test_expired_state_rejected(oauth):
-    now = time.time()
-    state = oauth.make_state(now=now)
+    state = oauth._pack_state("verifier")
     with pytest.raises(oauth.InvalidStateError, match="просрочена"):
-        oauth.verify_state(state, now=now + oauth.STATE_TTL_SEC + 1)
+        oauth.verify_state(state, now=time.time() + oauth.STATE_TTL_SEC + 5)
 
 
 def test_state_valid_right_before_expiry(oauth):
-    now = time.time()
-    state = oauth.make_state(now=now)
-    oauth.verify_state(state, now=now + oauth.STATE_TTL_SEC - 1)
+    state = oauth._pack_state("verifier")
+    oauth.verify_state(state, now=time.time() + oauth.STATE_TTL_SEC - 5)
 
 
-def test_tampered_signature_rejected(oauth):
-    expires, _, signature = oauth.make_state().partition(".")
-    forged = f"{expires}.{'0' * len(signature)}"
-    with pytest.raises(oauth.InvalidStateError, match="подпись"):
-        oauth.verify_state(forged)
+def test_tampered_state_rejected(oauth):
+    state = oauth._pack_state("verifier")
+    broken = state[:-6] + ("AAAAAA" if not state.endswith("AAAAAA") else "BBBBBB")
+    with pytest.raises(oauth.InvalidStateError):
+        oauth.verify_state(broken)
 
 
-def test_extended_deadline_rejected(oauth):
-    """Продлить срок, не зная ключа, нельзя: он входит в подпись."""
-    expires, _, signature = oauth.make_state().partition(".")
-    forged = f"{int(expires) + 86400}.{signature}"
-    with pytest.raises(oauth.InvalidStateError, match="подпись"):
-        oauth.verify_state(forged)
+def test_state_from_another_key_rejected(oauth, env):
+    """Чужой сервис со своим ключом не выпишет пропуск в наш колбэк."""
+    from cryptography.fernet import Fernet
+
+    from tutorsync import crypto
+
+    state = oauth._pack_state("verifier")
+    env(SECRET_ENC_KEY=Fernet.generate_key().decode())
+    crypto.reset_cache()
+
+    with pytest.raises(oauth.InvalidStateError):
+        oauth.verify_state(state)
 
 
-@pytest.mark.parametrize("state", ["", "no-dot", "abc.def", ".", "1700000000."])
+@pytest.mark.parametrize("state", ["", "not-a-token", "abc.def", "1700000000.deadbeef"])
 def test_malformed_state_rejected(oauth, state):
     with pytest.raises(oauth.InvalidStateError):
         oauth.verify_state(state)

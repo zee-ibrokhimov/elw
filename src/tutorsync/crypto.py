@@ -60,6 +60,19 @@ def decrypt(ciphertext: str) -> str:
         ) from exc
 
 
+def issued_at(ciphertext: str) -> float | None:
+    """Когда был создан шифртекст, unix-время.
+
+    Fernet кладёт метку времени в сам токен, и это избавляет от отдельного поля
+    со сроком годности и отдельной подписи к нему: значение, которое нельзя
+    подделать, не расшифровав токен, уже есть внутри.
+    """
+    try:
+        return float(_fernet().extract_timestamp(ciphertext.encode()))
+    except InvalidToken:
+        return None
+
+
 def reset_cache() -> None:
     """Сбрасывает закэшированный Fernet. Нужен тестам, меняющим ключ на лету."""
     _fernet.cache_clear()
