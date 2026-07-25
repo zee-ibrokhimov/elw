@@ -123,7 +123,7 @@ async def oauth_callback(
             )
 
         try:
-            verify_state(state)
+            code_verifier = verify_state(state)
         except InvalidStateError as exc:
             log.warning("oauth.bad_state", error=str(exc))
             return _page(
@@ -133,7 +133,7 @@ async def oauth_callback(
             )
 
         try:
-            creds = await exchange_code(code)
+            creds = await exchange_code(code, code_verifier)
             email = await CalendarClient(creds).account_email()
             async with session_scope() as session:
                 await store_credentials(session, creds, email)

@@ -9,8 +9,8 @@
 редиректит Google из браузера, и закрыть его аутентификацией нельзя. Значит любой,
 кто знает адрес, может дойти до него со своим кодом авторизации — и, если бы мы
 принимали всё подряд, подсунуть сервису чужой аккаунт, после чего расписание
-поехало бы в чужой календарь. Отсюда параметр ``state``, подписанный HMAC на
-SECRET_ENC_KEY: ссылку выдаёт только бот и только админу, живёт она десять минут.
+поехало бы в чужой календарь. Отсюда параметр ``state``, зашифрованный ключом
+сервиса: ссылку выдаёт только бот и только админу, живёт она десять минут.
 
 **Refresh-токен выдаётся не всегда.** Google отдаёт его только при первом согласии,
 а на повторных возвращает лишь access-токен. Поэтому ``prompt=consent`` стоит
@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import hashlib
-import hmac
+import secrets
 import time
 
 import sqlalchemy as sa
@@ -33,7 +32,7 @@ from google_auth_oauthlib.flow import Flow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tutorsync.config import Settings, get_settings
-from tutorsync.crypto import decrypt, encrypt
+from tutorsync.crypto import decrypt, encrypt, issued_at
 from tutorsync.db.models import OAuthCredential
 from tutorsync.logging import get_logger
 
@@ -65,35 +64,56 @@ class InvalidStateError(RuntimeError):
 # ==============================================================================
 #  Одноразовый state
 # ==============================================================================
+#
+# В state едет не только «эту ссылку выдали мы», но и code_verifier протокола
+# PKCE. Причина техническая и неочевидная: google-auth-oauthlib генерирует
+# верификатор внутри объекта Flow при построении ссылки, а колбэк прилетает
+# отдельным HTTP-запросом, в котором Flow создаётся заново — и верификатор
+# теряется. Google на обмене отвечает «Missing code verifier».
+#
+# Хранить его негде: сервер без сессий, а заводить таблицу ради строки, живущей
+# десять минут, — лишняя сущность. Зато state Google возвращает дословно, и
+# он подходит идеально: шифруем верификатор ключом сервиса и кладём туда.
+#
+# Отказаться от PKCE было бы проще (для web-клиента с секретом он необязателен),
+# но он защищает ровно от того сценария, который здесь реален: перехвата кода
+# авторизации из адресной строки или истории браузера.
 
 
-def _sign(expires_at: int) -> str:
-    key = get_settings().secret_enc_key.encode()
-    return hmac.new(key, str(expires_at).encode(), hashlib.sha256).hexdigest()[:32]
+def _pack_state(code_verifier: str) -> str:
+    """Шифрует верификатор ключом сервиса.
+
+    Fernet, а не подпись: значение внутри должно остаться нечитаемым. Он же
+    несёт метку времени, по которой проверяется срок жизни ссылки, — отдельное
+    поле с датой и отдельная подпись к нему были бы тем же самым, но руками.
+    """
+    return encrypt(code_verifier)
 
 
-def make_state(now: float | None = None) -> str:
-    """Подписанная метка «эту ссылку выдал сервис, и вот когда она протухнет»."""
-    expires_at = int((now if now is not None else time.time()) + STATE_TTL_SEC)
-    return f"{expires_at}.{_sign(expires_at)}"
+def verify_state(state: str, now: float | None = None) -> str:
+    """Проверяет state и возвращает спрятанный в нём code_verifier.
 
-
-def verify_state(state: str, now: float | None = None) -> None:
-    """Бросает InvalidStateError, если state подделан или просрочен."""
-    expires_at_raw, _, signature = state.partition(".")
-    if not signature:
-        raise InvalidStateError("state без подписи")
+    Бросает InvalidStateError, если state подделан, испорчен или просрочен.
+    """
     try:
-        expires_at = int(expires_at_raw)
-    except ValueError as exc:
-        raise InvalidStateError("state с нечисловым сроком годности") from exc
+        verifier = decrypt(state)
+    except Exception as exc:  # SecretUnreadableError и любой мусор в параметре
+        raise InvalidStateError("ссылка повреждена или выдана не этим сервисом") from exc
 
-    # compare_digest, а не ==: обычное сравнение строк выходит на первом
-    # несовпавшем символе и по времени ответа позволяет подбирать подпись.
-    if not hmac.compare_digest(signature, _sign(expires_at)):
-        raise InvalidStateError("подпись state не сходится")
-    if (now if now is not None else time.time()) > expires_at:
-        raise InvalidStateError("ссылка авторизации просрочена, запроси новую")
+    created = issued_at(state)
+    if created is not None:
+        if (now if now is not None else time.time()) - created > STATE_TTL_SEC:
+            raise InvalidStateError("ссылка авторизации просрочена, запроси новую")
+    return verifier
+
+
+def make_code_verifier() -> str:
+    """Случайная строка PKCE.
+
+    Алфавит token_urlsafe (A–Z, a–z, 0–9, «-», «_») целиком входит в разрешённый
+    RFC 7636, а длина попадает в требуемые 43–128 символов.
+    """
+    return secrets.token_urlsafe(64)
 
 
 # ==============================================================================
@@ -124,24 +144,36 @@ def _flow(settings: Settings) -> Flow:
     return flow
 
 
-def build_auth_url(state: str) -> str:
+def build_auth_url() -> str:
+    """Ссылка на экран согласия Google.
+
+    Верификатор PKCE задаётся до построения ссылки, а не читается из Flow
+    после неё: state передаётся параметром в тот же вызов, который верификатор
+    и порождает, — взять его оттуда постфактум уже некуда.
+    """
     settings = get_settings()
-    url, _ = _flow(settings).authorization_url(
+    flow = _flow(settings)
+    flow.code_verifier = make_code_verifier()
+
+    url, _ = flow.authorization_url(
         # offline — иначе refresh-токена не будет вовсе и сервис проживёт час.
         access_type="offline",
         # consent — иначе refresh-токен придёт только при самой первой
         # авторизации, а при переподключении молча не придёт.
         prompt="consent",
         include_granted_scopes="true",
-        state=state,
+        state=_pack_state(flow.code_verifier),
     )
     return str(url)
 
 
-async def exchange_code(code: str) -> Credentials:
+async def exchange_code(code: str, code_verifier: str) -> Credentials:
     """Меняет код авторизации на токены. Сетевой вызов — уводим из event loop."""
     settings = get_settings()
     flow = _flow(settings)
+    # Тот же верификатор, что уехал в code_challenge при построении ссылки:
+    # Google сверяет их между собой и без совпадения код не обменяет.
+    flow.code_verifier = code_verifier
 
     def _fetch() -> Credentials:
         flow.fetch_token(code=code)

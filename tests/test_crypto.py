@@ -53,6 +53,27 @@ def test_tampered_ciphertext_rejected(crypto):
         mod.decrypt(broken)
 
 
+def test_issued_at_returns_real_time(crypto):
+    """Метка времени должна извлекаться, а не тихо возвращать None.
+
+    На этом уже спотыкались: extract_timestamp — метод экземпляра, а не класса,
+    и вызов через класс падал с TypeError. Проглоченный, он выключал проверку
+    срока годности ссылки авторизации, ничем это не обозначая.
+    """
+    import time
+
+    mod = crypto()
+    created = mod.issued_at(mod.encrypt("что угодно"))
+
+    assert created is not None
+    assert abs(created - time.time()) < 5
+
+
+def test_issued_at_on_garbage_is_none(crypto):
+    mod = crypto()
+    assert mod.issued_at("не токен вовсе") is None
+
+
 def test_non_fernet_key_fails_loudly(crypto):
     """token_urlsafe(32) — самая вероятная ошибка при генерации ключа."""
     mod = crypto("this-is-not-a-fernet-key")
