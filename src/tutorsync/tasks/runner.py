@@ -4,8 +4,8 @@
 процессов, каждая периодическая задача выполнялась бы трижды — сверка расписания
 и рассылка напоминаний этого не прощают.
 
-Сейчас крутится единственная задача — проверка живости базы. Синхронизация с
-Google (этап 2), приём писем (этап 3) и напоминания (этап 4) подключаются сюда же.
+Сейчас крутятся две задачи: проверка живости базы и разбор очереди внешних
+эффектов. Приём писем (этап 3) и напоминания (этап 4) подключаются сюда же.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from tutorsync.db.models import ChannelHealth
 from tutorsync.db.session import dispose_engine, session_scope
 from tutorsync.enums import SyncChannel
 from tutorsync.logging import get_logger, trace
+from tutorsync.services import notify
+from tutorsync.tasks import outbox
 
 log = get_logger(__name__)
 
@@ -57,6 +59,24 @@ async def _mark_success(session: AsyncSession, channel: SyncChannel) -> None:
     row.alerted_at = None
 
 
+async def drain_outbox() -> None:
+    """Разбирает очередь внешних эффектов.
+
+    Ошибки конкретных заданий обрабатываются внутри process_once; сюда долетает
+    только то, что сломалось до них — например, недоступная база. Планировщик
+    APScheduler по умолчанию проглатывает исключения задачи молча, поэтому
+    ловим и логируем сами.
+    """
+    with trace(channel="outbox"):
+        try:
+            handled = await outbox.process_once()
+            if handled:
+                log.info("outbox.drained", handled=handled)
+        # Планировщик не должен останавливаться из-за одного неудачного прохода.
+        except Exception as exc:
+            log.error("outbox.drain_failed", error=str(exc))
+
+
 async def run_worker() -> None:
     settings = get_settings()
     scheduler = AsyncIOScheduler(timezone=dt.UTC)
@@ -68,6 +88,16 @@ async def run_worker() -> None:
         # Если процесс подвис и пропустил несколько запусков, догонять их
         # не нужно — достаточно одного свежего.
         coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        drain_outbox,
+        "interval",
+        seconds=15,
+        id="outbox",
+        coalesce=True,
+        # max_instances=1 здесь принципиально: два одновременных прохода
+        # разобрали бы одни и те же задания на SQLite, где нет SKIP LOCKED.
         max_instances=1,
     )
     scheduler.start()
@@ -82,6 +112,7 @@ async def run_worker() -> None:
         await stop.wait()
     finally:
         scheduler.shutdown(wait=False)
+        await notify.close()
         await dispose_engine()
         log.info("worker.stopped")
 
