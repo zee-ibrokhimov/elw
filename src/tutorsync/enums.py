@@ -16,6 +16,10 @@ class LessonSource(str, enum.Enum):
     PRIVATE = "private"
     #: Служебная занятость, поставленная админом через /block.
     BLOCK = "block"
+    #: Событие из чужого календаря, который сервис только читает
+    #: (EXTRA_BUSY_CALENDAR_IDS). Не урок и не бронь: время занято, а кем и
+    #: почему — сервиса не касается. Наружу такие записи не проецируются.
+    EXTERNAL = "external"
 
 
 class LessonStatus(str, enum.Enum):
@@ -40,6 +44,11 @@ class IntervalRole(str, enum.Enum):
     LESSON = "lesson"
     BUFFER_BEFORE = "buffer_before"
     BUFFER_AFTER = "buffer_after"
+    #: Занятость, импортированная из чужого календаря. Намеренно не LESSON:
+    #: чужие события законно накладываются друг на друга (один и тот же урок
+    #: может лежать и в основном календаре, и в календаре Preply), а под
+    #: EXCLUDE-констрейнтом такое наложение сорвало бы весь импорт.
+    EXTERNAL = "external"
 
 
 class CalendarKey(str, enum.Enum):

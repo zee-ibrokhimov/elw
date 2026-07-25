@@ -4,8 +4,9 @@
 процессов, каждая периодическая задача выполнялась бы трижды — сверка расписания
 и рассылка напоминаний этого не прощают.
 
-Сейчас крутятся две задачи: проверка живости базы и разбор очереди внешних
-эффектов. Приём писем (этап 3) и напоминания (этап 4) подключаются сюда же.
+Сейчас крутятся три задачи: проверка живости базы, разбор очереди внешних
+эффектов и импорт чужой занятости. Приём писем (этап 3) и напоминания
+(этап 4) подключаются сюда же.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from tutorsync.db.session import dispose_engine, session_scope
 from tutorsync.enums import SyncChannel
 from tutorsync.logging import get_logger, trace
 from tutorsync.services import notify
-from tutorsync.tasks import outbox
+from tutorsync.tasks import busy, outbox
 
 log = get_logger(__name__)
 
@@ -77,6 +78,18 @@ async def drain_outbox() -> None:
             log.error("outbox.drain_failed", error=str(exc))
 
 
+async def refresh_busy() -> None:
+    """Перечитывает чужие календари.
+
+    Ошибки разбираются внутри refresh_busy и наружу не выходят; здесь остаётся
+    только запись результата в лог, чтобы по журналу было видно, что импорт
+    действительно идёт, а не молчит.
+    """
+    stats = await busy.refresh_busy()
+    if stats:
+        log.info("busy.refreshed", **stats)
+
+
 async def run_worker() -> None:
     settings = get_settings()
     scheduler = AsyncIOScheduler(timezone=dt.UTC)
@@ -100,11 +113,23 @@ async def run_worker() -> None:
         # разобрали бы одни и те же задания на SQLite, где нет SKIP LOCKED.
         max_instances=1,
     )
+    scheduler.add_job(
+        refresh_busy,
+        "interval",
+        minutes=settings.busy_import_interval_min,
+        id="busy_import",
+        coalesce=True,
+        max_instances=1,
+        # Первый проход сразу после старта, а не через интервал: иначе после
+        # перезапуска бот несколько минут считал бы расписание пустым.
+        next_run_time=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=20),
+    )
     scheduler.start()
     log.info(
         "worker.started",
         version=__version__,
         reconcile_interval_min=settings.reconcile_interval_min,
+        busy_import_interval_min=settings.busy_import_interval_min,
     )
 
     stop = asyncio.Event()
